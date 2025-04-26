@@ -1,13 +1,18 @@
 # Developing a lightning prediction model from six near-surface climate reanalysis products 
 
-This Github repository contains code for models developed for lighning prediction from cliamte data as well as figures for the results of the accompanying paper. 
-
-
-
-
+This Github repository contains code for models developed for lighning prediction from cliamte data as well as figures for the results of the accompanying paper.  
 
 ## Data
 
 Due to their success in predicting lightning occurrence in Romps et al. (2014) and Chen et al. (2021), Convective Available Potential Energy, or CAPE (J/kg), and the interaction between CAPE and Precipitation (CAPE x Precipitation) were selected to be the atmospheric climate predictors for comparison with widely available near-surface climate predictors. These include 2 meter temperature (Celcius), instantaneous 10 meter wind gust (m/s), mean surface downward short-wave radiation flux (W/m2), surface pressure (Pa), mean total precipitation rate (kg/m2/s), and relative humidity (%, calculated from temperature and 2 meter dew point temperature). All climate data are sourced from the ERA5 climate reanalysis product (Muñoz-Sabater et al. 2021) and are on a 0.25 x 0.25 degree resolution grid (corresponding, in the study region, to an approximately 28 km by 20 km grid) that covers New England and New York. The data span a six year period (2005 - 2010) on an hourly time step. Relative humidity and the CAPE x Precipitation term were calculated at the hourly scale before being summarized to monthly averages. Climate variables were standardized using the z-score standardization method to improve numerical stability during parameter estimation.
 
 The Vaisala National Lightning Detection Network (Vaisala, Inc.) provided daily lightning counts for the 2005-2010 period. The data were collected by ground-based stations that detect electromagnetic activity emitted during a lightning strike. The dataset includes the date, time, location, and number of strokes for each cloud-to-ground lightning flash. A cloud-to-ground strike consists of all the cloud-to-ground strokes that occur within 10 km and 1 second of each other. Here, we are interested in modeling cloud-to-ground strikes, not strokes. Lightning flash counts remain at or close to zero during winter months (Figure 1a). To address the challenges of zero-inflated data, we followed the methods of Moon and Kim (2020), excluding the winter months (October to April), which reduced the percentage of zeros in the lighting data from 93% to 85%. To match the lightning point data to the ERA5 grid, lightning point locations were assigned to a raster layer with the same spatial resolution as the ERA5 grid (0.25° x 0.25°). Lightning strikes that occurred within a given cell during a given summer month (May to September) were summed and divided by the gridcell area to calculate a lightning flash rate, expressed in flashes per km² per month, a unit derived from Romps et al. (2014). This procedure was carried out for each summer season across the entire study period (2005–2010) and region (New England and New York). Aggregating the data this way allowed for a consistent spatial and temporal alignment of the lightning data with the ERA5 climate data and kept the target variable (lightning strike rate) above zero, facilitating downstream modeling. The data include 3,246 observations and were split into train (80%) and test (20%) 
+
+## References
+
+Chen, Yang, David M. Romps, Jacob T. Seeley, Sander Veraverbeke, William J. Riley, Zelalem A. Mekonnen, and James T. Randerson. 2021. “Future Increases in Arctic Lightning and Fire Risk for Permafrost Carbon.” Nature Climate Change 11(5):404–10. doi: 10.1038/s41558-021-01011-y.
+
+Hersbach, Hans, Bill Bell, Paul Berrisford, Shoji Hirahara, András Horányi, Joaquín Muñoz-Sabater, Julien Nicolas, Carole Peubey, Raluca Radu, Dinand Schepers, Adrian Simmons, Cornel Soci, Saleh Abdalla, Xavier Abellan, Gianpaolo Balsamo, Peter Bechtold, Gionata Biavati, Jean Bidlot, Massimo Bonavita, Giovanna De Chiara, Per Dahlgren, Dick Dee, Michail Diamantakis, Rossana Dragani, Johannes Flemming, Richard Forbes, Manuel Fuentes, Alan Geer, Leo Haimberger, Sean Healy, Robin J. Hogan, Elías Hólm, Marta Janisková, Sarah Keeley, Patrick Laloyaux, Philippe Lopez, Cristina Lupu, Gabor Radnoti, Patricia de Rosnay, Iryna Rozum, Freja Vamborg, Sebastien Villaume, and Jean-Noël Thépaut. 2020. “The ERA5 Global Reanalysis.” Quarterly Journal of the Royal Meteorological Society 146(730):1999–2049. doi: 10.1002/qj.3803.
+
+Vaisala, Inc. n.d. “Vaisala National Lightning Detection Network.”
+
