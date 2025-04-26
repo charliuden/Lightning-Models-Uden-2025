@@ -1,0 +1,457 @@
+---
+title: "Gamma Generalized Linear Models"
+author: "Charlotte Uden"
+date: "2025-04-05"
+output: html_document
+---
+
+```{r, echo=FALSE, include=FALSE}
+library(rstan)
+library(loo)
+library(dplyr)
+library(stats)
+library(caret)
+library(tidyr)
+library(gridExtra)
+library(mapdata)
+library(DescTools)
+```
+
+Load configuration files
+- location of climate and lighting drivers
+- location to store tables containing parameter estimates, model predictions, and performance metrics
+```{r}
+read_properties <- function(file_path) {
+  lines <- readLines(file_path)
+  lines <- lines[grepl("=", lines)]  # only keep lines with key-value pairs
+  key_vals <- strsplit(lines, "=")
+  props <- setNames(
+    trimws(sapply(key_vals, `[`, 2)),
+    trimws(sapply(key_vals, `[`, 1))
+  )
+  return(props)
+}
+
+config <- read_properties("/raid/cuden/config_files/lightning_config.properties")  # Use the full path!
+
+# Extract values from config
+data_root <- config[["data_root"]]
+table_file_path <- config[["table_root"]]
+
+# Use the values to build full paths
+drivers_file_path <- file.path(data_root, "era5_vaisalaLightning_monthlySummerSummaries_2005-2010_NEclip.csv")
+```
+
+1. Read in the data
+
+Make sure columns names are consistent with column names in this script: 
+- lon (longitude)
+- lat (latitude)
+- year
+- strikes (lightning strike rate, in flashes/km-2/month)
+- cape (convective available potential energy, or CAPE in J kg-1)
+- precip (precipitation in kg m-2 s-1)
+- cxp (the product of CAPE and precipitation)
+- tair (2 meter air temperature in degrees Celcius)
+- wind (wind speed in m s-1)
+- swr (shortwave radiation in W m-2)
+- sp (surface pressure in Pa)
+- rh (relative humidity expressed as a %)
+Data should be summarized to monthly averages. 
+
+```{r, echo=FALSE}
+df <- read.csv(drivers_file_path)
+#rename columns if necessary
+#colnames(df) <- c("lon", "lat", "year", "strikes", "cape", "precip", "cxp", "tair", "wind", "swr", "sp", "rh")
+```
+
+2. Split into training and testing data
+```{r, echo=FALSE}
+## 80% of the sample size
+sample_size <- floor(0.8 * nrow(df))
+
+## set the seed to make partition reproducible
+set.seed(123)
+train_index <- sample(seq_len(nrow(df)), size = sample_size)
+
+train <- df[train_index, ]
+test <- df[-train_index, ]
+
+```
+
+3. Standardize the data
+```{r}
+mu_cxp <- mean(train$cxp)
+sigma_cxp <- sd(train$cxp)
+mu_cape <- mean(train$cape)
+sigma_cape <- sd(train$cape)
+mu_precip <- mean(train$precip)
+sigma_precip <- sd(train$precip)
+mu_tair <- mean(train$tair)
+sigma_tair <- sd(train$tair)
+mu_wind <- mean(train$wind)
+sigma_wind <- sd(train$wind)
+mu_swr <- mean(train$swr)
+sigma_swr <- sd(train$swr)
+mu_sp <- mean(train$sp)
+sigma_sp <- sd(train$sp)
+mu_rh <- mean(train$rh)
+sigma_rh <- sd(train$rh)
+#-----
+
+train <- train %>%
+  mutate(cape = (cape-mu_cape)/sigma_cape) %>%
+  mutate(precip = (precip-mu_precip)/sigma_precip) %>%
+  mutate(cxp = (cxp-mu_cxp)/sigma_cxp) %>%
+  mutate(tair = (tair-mu_tair)/sigma_tair) %>%
+  mutate(wind = (wind-mu_wind)/sigma_wind) %>%
+  mutate(swr = (swr-mu_swr)/sigma_swr) %>%
+  mutate(sp = (sp-mu_sp)/sigma_sp) %>%
+  mutate(rh = (rh-mu_rh)/sigma_rh)
+
+train <- train[,c("strikes", "cape", "precip", "cxp", "tair", "wind", "swr", "sp", "rh")]
+head(train)
+
+#use the min and max values from the train set to normalize the test set
+test <- test %>%
+  mutate(cape = (cape-mu_cape)/sigma_cape) %>%
+  mutate(precip = (precip-mu_precip)/sigma_precip) %>%
+  mutate(cxp = (cxp-mu_cxp)/sigma_cxp) %>%
+  mutate(tair = (tair-mu_tair)/sigma_tair) %>%
+  mutate(wind = (wind-mu_wind)/sigma_wind) %>%
+  mutate(swr = (swr-mu_swr)/sigma_swr) %>%
+  mutate(sp = (sp-mu_sp)/sigma_sp) %>%
+  mutate(rh = (rh-mu_rh)/sigma_rh) %>%
+  mutate(lon = lon) %>%
+  mutate(lat = lat)
+
+test <- test[,c("lon", "lat", "strikes", "cape", "precip", "cxp", "tair", "wind", "swr", "sp", "rh")]
+
+plot(test)
+
+```
+
+Function to calculate skill score (Perkins et al. 2007)
+```{r}
+calculate_sscore <- function(obs, pred, nbins = 15, plot = FALSE) {
+  # Determine common break points based on the range of both datasets
+  min_val <- min(c(obs, pred))
+  max_val <- max(c(obs, pred))
+  breaks <- seq(min_val, max_val, length.out = nbins + 1)
+  
+  # Compute histograms for observed and predicted data using the same breaks
+  hist_obs <- hist(obs, breaks = breaks, plot = FALSE)
+  hist_pred <- hist(pred, breaks = breaks, plot = FALSE)
+  
+  # Optionally, plot the histograms for visual inspection
+  if (plot) {
+    plot(hist_obs, col = rgb(1, 0, 0, 0.5), main = "Histograms", xlab = "Value")
+    plot(hist_pred, col = rgb(0, 0, 1, 0.5), add = TRUE)
+    legend("topright", legend = c("Observed", "Predicted"),
+           fill = c(rgb(1, 0, 0, 0.5), rgb(0, 0, 1, 0.5)))
+  }
+  
+  # Convert counts to probabilities so that they sum to 1 - for each bin, take the frequency 
+  #(counts in that bin) and divide by total counts to get a proportion - or probability. 
+  prob_obs <- hist_obs$counts / sum(hist_obs$counts)
+  prob_pred <- hist_pred$counts / sum(hist_pred$counts)
+  
+  # Calculate the overlap: the sum over bins of the minimum probability in each bin.
+  sscore <- sum(pmin(prob_obs, prob_pred))
+  
+  return(sscore)
+}
+
+```
+
+Fit generalized linear model with family = Gamma, link = log.
+```{r}
+#--------------------------
+#CAPE
+G1 <- glm(strikes ~ cape,
+                 data = train,
+                 family = Gamma(link =log))
+
+y_pred_G1 <- predict(G1, newdata = test, type = "response")
+hist(y_pred_G1)
+
+a <- G1$coefficients[1]
+b <- G1$coefficients[2]
+
+y_pred_G1 <- exp(a + b * test$cape)
+hist(y_pred_G1)
+
+rmse_G1 <- Metrics::rmse(test$strikes, y_pred_G1)
+cor_G1 <- cor(test$strikes, y_pred_G1)
+sscore_G1 <- calculate_sscore(obs=test$strikes, pred=y_pred_G1, nbins = 15, plot = FALSE)
+
+#--------------------------
+#Cape x Precip
+G2 <- glm(strikes ~ cxp,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G2$coefficients[1]
+b <- G2$coefficients[2]
+
+y_pred_G2 <- exp(a + b*test$cxp)
+
+rmse_G2 <- Metrics::rmse(test$strikes, y_pred_G2)
+cor_G2 <- cor(test$strikes, y_pred_G2)
+sscore_G2 <- calculate_sscore(obs=test$strikes, pred=y_pred_G2, nbins = 15, plot = FALSE)
+
+#--------------------------
+#Relative Humidity
+G3 <- glm(strikes ~ rh,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G3$coefficients[1]
+b <- G3$coefficients[2]
+
+y_pred_G3 <- exp(a + b*test$rh)
+
+rmse_G3 <- Metrics::rmse(test$strikes, y_pred_G3)
+cor_G3 <- cor(test$strikes, y_pred_G3)
+sscore_G3 <- calculate_sscore(obs=test$strikes, pred=y_pred_G3, nbins = 15, plot = FALSE)
+
+#--------------------------
+#Short Wave Radition
+G4 <- glm(strikes ~ swr,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G4$coefficients[1]
+b <- G4$coefficients[2]
+
+y_pred_G4 <- exp(a + b*test$swr)
+
+rmse_G4 <- Metrics::rmse(test$strikes, y_pred_G4)
+cor_G4 <- cor(test$strikes, y_pred_G4)
+sscore_G4 <- calculate_sscore(obs=test$strikes, pred=y_pred_G4, nbins = 15, plot = FALSE)
+
+#--------------------------
+#Temperature
+G5 <- glm(strikes ~ tair,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G5$coefficients[1]
+b <- G5$coefficients[2]
+
+y_pred_G5 <- exp(a + b*test$tair)
+
+rmse_G5 <- Metrics::rmse(test$strikes, y_pred_G5)
+cor_G5 <- cor(test$strikes, y_pred_G5)
+sscore_G5 <- calculate_sscore(obs=test$strikes, pred=y_pred_G5, nbins = 15, plot = FALSE)
+
+#--------------------------
+#Surface Pressure
+G6 <- glm(strikes ~ sp,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G6$coefficients[1]
+b <- G6$coefficients[2]
+
+y_pred_G6 <- exp(a + b*test$sp)
+
+rmse_G6 <- Metrics::rmse(test$strikes, y_pred_G6)
+cor_G6 <- cor(test$strikes, y_pred_G6)
+sscore_G6 <- calculate_sscore(obs=test$strikes, pred=y_pred_G6, nbins = 15, plot = FALSE)
+
+#--------------------------
+#Precipitation
+G7 <- glm(strikes ~ precip,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G7$coefficients[1]
+b <- G7$coefficients[2]
+
+y_pred_G7 <- exp(a + b*test$precip)
+
+rmse_G7 <- Metrics::rmse(test$strikes, y_pred_G7)
+cor_G7 <- cor(test$strikes, y_pred_G7)
+sscore_G7 <- calculate_sscore(obs=test$strikes, pred=y_pred_G7, nbins = 15, plot = FALSE)
+
+#--------------------------
+#Precipitation
+G8 <- glm(strikes ~ wind,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G8$coefficients[1]
+b <- G8$coefficients[2]
+
+y_pred_G8 <- exp(a + b*test$wind)
+
+rmse_G8 <- Metrics::rmse(test$strikes, y_pred_G8)
+cor_G8 <- cor(test$strikes, y_pred_G8)
+sscore_G8 <- calculate_sscore(obs=test$strikes, pred=y_pred_G8, nbins = 15, plot = FALSE)
+
+#--------------------------
+#swr + tair
+G9 <- glm(strikes ~ swr + tair,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G9$coefficients[1]
+b <- G9$coefficients[2]
+c <- G9$coefficients[3]
+
+y_pred_G9 <- exp(a + b*test$swr + c*test$tair)
+
+rmse_G9 <- Metrics::rmse(test$strikes, y_pred_G9)
+cor_G9 <- cor(test$strikes, y_pred_G9)
+sscore_G9 <- calculate_sscore(obs=test$strikes, pred=y_pred_G9, nbins = 15, plot = FALSE)
+
+#--------------------------
+#swr + tair + rh
+G10 <- glm(strikes ~ swr + tair + rh,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G10$coefficients[1]
+b <- G10$coefficients[2]
+c <- G10$coefficients[3]
+d <- G10$coefficients[4]
+
+y_pred_G10 <- exp(a + b*test$swr + c*test$tair + d*test$rh)
+
+rmse_G10 <- Metrics::rmse(test$strikes, y_pred_G10)
+cor_G10 <- cor(test$strikes, y_pred_G10)
+sscore_G10 <- calculate_sscore(obs=test$strikes, pred=y_pred_G10, nbins = 15, plot = FALSE)
+
+#--------------------------
+#swr + tair + rh + wind
+G11 <- glm(strikes ~ swr + tair + rh + wind,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G11$coefficients[1]
+b <- G11$coefficients[2]
+c <- G11$coefficients[3]
+d <- G11$coefficients[4]
+e <- G11$coefficients[5]
+
+y_pred_G11 <- exp(a + b*test$swr + c*test$tair + d*test$rh + e*test$wind)
+
+rmse_G11 <- Metrics::rmse(test$strikes, y_pred_G11)
+cor_G11 <- cor(test$strikes, y_pred_G11)
+sscore_G11 <- calculate_sscore(obs=test$strikes, pred=y_pred_G11, nbins = 15, plot = FALSE)
+
+#--------------------------
+#swr + tair + rh + wind + precip
+G12 <- glm(strikes ~ swr + tair + rh + wind + precip,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G12$coefficients[1]
+b <- G12$coefficients[2]
+c <- G12$coefficients[3]
+d <- G12$coefficients[4]
+e <- G12$coefficients[5]
+f <- G12$coefficients[6]
+
+y_pred_G12 <- exp(a + b*test$swr + c*test$tair + d*test$rh +e*test$wind + f*test$precip)
+
+rmse_G12 <- Metrics::rmse(test$strikes, y_pred_G12)
+cor_G12 <- cor(test$strikes, y_pred_G12)
+sscore_G12 <- calculate_sscore(obs=test$strikes, pred=y_pred_G12, nbins = 15, plot = FALSE)
+
+#--------------------------
+#swr + tair + rh + wind + precip +sp
+G13 <- glm(strikes ~ swr + tair + rh + wind + precip + sp,
+                 data = train,
+                 family = Gamma(link =log))
+a <- G13$coefficients[1]
+b <- G13$coefficients[2]
+c <- G13$coefficients[3]
+d <- G13$coefficients[4]
+e <- G13$coefficients[5]
+f <- G13$coefficients[6]
+g <- G13$coefficients[7]
+
+y_pred_G13 <- exp(a + b*test$swr + c*test$tair + d*test$rh +e*test$wind + f*test$precip + g*test$sp)
+
+rmse_G13 <- Metrics::rmse(test$strikes, y_pred_G13)
+cor_G13 <- cor(test$strikes, y_pred_G13)
+sscore_G13 <- calculate_sscore(obs=test$strikes, pred=y_pred_G13, nbins = 15, plot = FALSE)
+```
+
+#Put together table of performance metrics and predictions
+```{r}
+rmse <- c(rmse_G1, rmse_G2, rmse_G3, rmse_G4, rmse_G5, rmse_G6, rmse_G7, rmse_G8, rmse_G9, rmse_G10, rmse_G11, rmse_G12, rmse_G13)
+
+cor <- c(cor(test$strikes, y_pred_G1), cor(test$strikes, y_pred_G2), cor(test$strikes, y_pred_G3), cor(test$strikes, y_pred_G4), cor(test$strikes, y_pred_G5), cor(test$strikes, y_pred_G6), cor(test$strikes, y_pred_G7), cor(test$strikes, y_pred_G8), cor(test$strikes, y_pred_G9), cor(test$strikes, y_pred_G10), cor(test$strikes, y_pred_G11), cor(test$strikes, y_pred_G12), cor(test$strikes, y_pred_G13))
+
+sscore <- c(sscore_G1, sscore_G2, sscore_G3, sscore_G4, sscore_G5, sscore_G6, sscore_G7, sscore_G8, sscore_G9, sscore_G10, sscore_G11, sscore_G12, sscore_G13)
+
+model_name <- c("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9", "G10", "G11", "G12", "G13")
+fitting_function <- c("glm", "glm", "glm", "glm", "glm",  "glm", "glm", "glm", "glm", "glm",  "glm", "glm", "glm")
+distribution <- c("gamma", "gamma", "gamma", "gamma", "gamma", "gamma", "gamma", "gamma", "gamma", "gamma", "gamma", "gamma", "gamma")
+group_name <- rep("Gamma GLM", 13)
+predictors <- c("CAPE", "CAPE x P", "RH", "SWR", "T", "SP", "P", "W", "SWR + T", "SWR + T + RH", "SWR + T + RH + W", "SWR + T + RH + W + + P", "SWR + T + RH + W + P + SP")
+
+performance <- data.frame(cbind(model_name, fitting_function, distribution, predictors, group_name, rmse, cor, sscore))
+
+print(performance)
+
+write.csv(performance, file.path(table_file_path, "Gamma_GLM_performance.csv"))
+```
+
+```{r}
+predictions <- data.frame(cbind(G1 = y_pred_G1, G2 = y_pred_G2, G3 = y_pred_G3, G4 = y_pred_G4, G5 = y_pred_G5, G6 = y_pred_G6, G7 = y_pred_G7, G8 = y_pred_G8, G9 = y_pred_G9, G10 = y_pred_G10, G11 = y_pred_G11, G12 = y_pred_G12, G13 = y_pred_G13))
+
+print(predictions)
+
+write.csv(predictions, file.path(table_file_path, "Gamma_GLM_predictions.csv"))
+
+```
+
+# Create a table of parameter estimates for Gamma GLMs
+```{r}
+# List of fitted model objects
+model_list <- list(G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13)
+model_labels <- paste0("G", 1:13)
+predictor_list <- c("CAPE", "CAPE x P", "RH", "SWR", "T", "SP", "P", "W",
+                    "SWR + T", "SWR + T + RH", "SWR + T + RH + W",
+                    "SWR + T + RH + W + P", "SWR + T + RH + W + P + SP")
+functional_forms <- c("a + b * CAPE","a + b * CAPE * P","a + b * RH","a + b * SWR","a + b * T","a + b * SP","a + b * P","a + b * W","a + b * SWR + c * T","a + b * SWR + c * T + d * RH","a + b * SWR + c * T + d * RH + e * W","a + b * SWR + c * T + d * RH + e * W + f * P","a + b * SWR + c * T + d * RH + e * W + f * P + g * SP")
+
+# Function to format coefficient ± 1.96 × SE
+format_ci <- function(est, se) {
+  if (is.na(est) || is.na(se)) return(NA)
+  error <- 1.96 * se
+  sprintf("%.3f ± %.3f", est, error)
+}
+
+# Initialize table
+param_table_gamma <- data.frame(model_label = character(),
+                                predictors = character(),
+                                a = character(), b = character(), c = character(),
+                                d = character(), e = character(), f = character(), g = character(),
+                                stringsAsFactors = FALSE)
+
+# Loop through models and extract formatted coefficients
+for (i in seq_along(model_list)) {
+  model <- model_list[[i]]
+  model_sum <- summary(model)
+  coefs <- coef(model)
+  ses <- model_sum$coefficients[, "Std. Error"]
+  
+  # Pad to max 7 coefficients
+  coefs_padded <- c(coefs, rep(NA, 7 - length(coefs)))
+  ses_padded <- c(ses, rep(NA, 7 - length(ses)))
+  
+  param_table_gamma <- rbind(param_table_gamma, data.frame(
+    model_label = model_labels[i],
+    predictors = predictor_list[i],
+    functional_form = functional_forms[i],
+    a = format_ci(coefs_padded[1], ses_padded[1]),
+    b = format_ci(coefs_padded[2], ses_padded[2]),
+    c = format_ci(coefs_padded[3], ses_padded[3]),
+    d = format_ci(coefs_padded[4], ses_padded[4]),
+    e = format_ci(coefs_padded[5], ses_padded[5]),
+    f = format_ci(coefs_padded[6], ses_padded[6]),
+    g = format_ci(coefs_padded[7], ses_padded[7])
+  ))
+}
+
+print(param_table_gamma)
+
+# Export
+write.csv(param_table_gamma, file.path(table_file_path, "Table_4.csv"), row.names = FALSE)
+```
+
+

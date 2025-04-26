@@ -1,0 +1,431 @@
+---
+title: "Chen et al. 2021 NE Parameterizations"
+author: "Charlotte Uden"
+date: "2025-02-09"
+output: html_document
+---
+
+## Applying models from Chen 2021 to the Northeast: This script parameterizes four models from this paper:
+
+-- Power law: power law regression: FR = a(CAPE × Precip)^b, with the parameters a and b derived from the 
+optimization at the log-log scale (that is, a linear regression between logarithmic values of flash 
+rate and CAPE × Precip were performed in practice). Similar to Romps et al.36, this model assumed that 
+the lightning flash rate depends on the product of CAPE and Precip. The coefficient b allows nonlinear 
+impacts to be represented in this form. 
+-- Power law (linear opt): is a variation of the power law model, but with the least squares optimization 
+obtained without a logarithmic transformation. 
+-- scale: the original scaling approach proposed by Romps et al.36: FR = a(CAPE × Precip). 
+-- linear: we slightly modified the scaling approach by allowing a negative intercept: FR = a(CAPE × Precip) + b 
+-that is, positive flash rate was simulated only when CAPE × Precip was greater than a threshold. 
+-- a non-parametric: a non-parametric regression model that includes a lookup table of flash rate as 
+a function of CAPE × Precip within the range of contemporary observations. The modelled flash 
+rate value in each bin was derived using the arithmetic means of the observed flash rate in all 
+grid cells associated with the corresponding ranges of CAPE × Precip. A linear extrapolation was used to 
+extend the model to cover CAPE × Precip values outside of the observational range.
+
+Refernce:
+Chen, Y., D. M. Romps, J. T. Seeley, S. Veraverbeke, W. J. Riley, Z. A. Mekonnen, and J. T. Randerson, 2021: Future increases in Arctic lightning and fire risk for permafrost carbon. Nat. Clim. Change, 11, 404–410, https://doi.org/10.1038/s41558-021-01011-y.
+
+```{r, echo=FALSE, include=FALSE}
+library(rstan)
+library(loo)
+library(dplyr)
+library(stats)
+library(caret)
+library(tidyr)
+library(gridExtra)
+library(mapdata)
+library(DescTools)
+```
+
+Load configuration files
+- location of climate and lighting drivers
+- location to store tables containing parameter estimates, model predictions, and performance metrics
+```{r}
+read_properties <- function(file_path) {
+  lines <- readLines(file_path)
+  lines <- lines[grepl("=", lines)]  # only keep lines with key-value pairs
+  key_vals <- strsplit(lines, "=")
+  props <- setNames(
+    trimws(sapply(key_vals, `[`, 2)),
+    trimws(sapply(key_vals, `[`, 1))
+  )
+  return(props)
+}
+
+config <- read_properties("/raid/cuden/config_files/lightning_config.properties")  # Use the full path!
+
+# Extract values from config
+data_root <- config[["data_root"]]
+table_file_path <- config[["table_root"]]
+
+# Use the values to build full paths
+drivers_file_path <- file.path(data_root, "era5_vaisalaLightning_monthlySummerSummaries_2005-2010_NEclip.csv")
+```
+
+1. Read in the data
+
+Make sure columns names are consistent with column names in this script: 
+- lon (longitude)
+- lat (latitude)
+- year
+- strikes (lightning strike rate, in flashes/km-2/month)
+- cape (convective available potential energy, or CAPE in J kg-1)
+- precip (precipitation in kg m-2 s-1)
+- cxp (the product of CAPE and precipitation)
+- tair (2 meter air temperature in degrees Celcius)
+- wind (wind speed in m s-1)
+- swr (shortwave radiation in W m-2)
+- sp (surface pressure in Pa)
+- rh (relative humidity expressed as a %)
+Data should be summarized to monthly averages. 
+
+```{r, echo=FALSE}
+df <- read.csv(drivers_file_path)
+#rename columns if necessary
+#colnames(df) <- c("lon", "lat", "year", "strikes", "cape", "precip", "cxp", "tair", "wind", "swr", "sp", "rh")
+```
+
+
+2. Split into training and testing data
+```{r, echo=FALSE}
+## 80% of the sample size
+sample_size <- floor(0.8 * nrow(df))
+
+## set the seed to make partition reproducible
+set.seed(123)
+train_index <- sample(seq_len(nrow(df)), size = sample_size)
+
+train <- df[train_index, ]
+test <- df[-train_index, ]
+
+```
+
+Look at the data
+```{r}
+x <- train$cxp
+y <- train$strikes
+
+x_test <- test$cxp
+y_test <- test$strikes
+
+plot(x, y, xlab="cape x precip", ylab="lightning srike rate (strikes per km2 per month")
+```
+
+3. Fit the models
+
+#-- Log Transformed Power Law: FR = a(CAPE × Precip)^b -- 
+
+```{r}
+
+# Log transform data
+log_x <- log(x) # standardize CAPE * precipitation
+log_y <- log(y + 0.0001) # lightning strike rate - add a small constant so that log(y) does not produce - inf.
+
+# Fit the power law model in log-log space
+pl <- lm(log_y ~ log_x)
+summary(pl)
+```
+
+### Predicitons
+```{r}
+a_estimate <- coef(pl)[1]
+b_estimate <- coef(pl)[2]
+
+# Log transform test data
+log_x_test <- log(x_test) 
+
+# Predict flash rate using the fitted power law
+y_pred_pl <- a_estimate + b_estimate * log_x_test 
+
+#convert log predictions back to original scale
+y_pred_pl <- exp(y_pred_pl)
+
+# Plot results
+predictions <- as.data.frame(cbind(x_test=x_test, y_test=y_test, y_pred_pl = y_pred_pl))
+ggplot(predictions) + geom_point(aes(x=x_test, y=y_test)) + geom_line(aes(x=x_test, y = y_pred_pl, col="red"))
+
+```
+
+#-- Power law (linear opt) --
+```{r}
+pl_op <- nls(y ~ a * x^b, start = list(a = 1, b = 1))
+summary(pl_op)
+
+a_pl_op <- summary(pl_op)$coefficients[1,1]
+b_pl_op <- summary(pl_op)$coefficients[2,1]
+```
+
+### Predicitons
+```{r}
+# Predict flash rate using the fitted power law
+y_pred_pl_op <- a_pl_op * x_test^b_pl_op
+
+# Plot results
+predictions <- as.data.frame(cbind(predictions, y_pred_pl_op = y_pred_pl_op))
+ggplot(predictions) + geom_point(aes(x=x_test, y=y_test)) + geom_line(aes(x=x_test, y = y_pred_pl_op, col="red"))
+```
+
+
+#-- scale: FR = a(CAPE × Precip) --
+```{r}
+# Fit the scale model (y = a * x)
+sc <- lm(y ~ x)
+  # Set reasonable starting value
+summary(sc)
+
+# Extract scaling parameter (just the intercept, as in Romps 2014)
+a_sc <- coef(sc)[2]
+```
+
+```{r}
+# Make predictions on test set
+y_pred_sc <- a_sc * x_test  # Since b is fixed at 1, we use y = a * x
+
+predictions <- data.frame(cbind(predictions, y_pred_sc = y_pred_sc))
+ggplot(predictions) + geom_point(aes(x=x_test, y=y_test)) + geom_line(aes(x=x_test, y = y_pred_sc, col="red"))
+```
+
+#-- linear: FR = a(CAPE × Precip) + b -- 
+```{r}
+# Fit the linear model (y = a * x + b)
+linear <- nls(y ~ a * x + b, 
+                   start = list(a = 1, b = 0))  # Set reasonable starting value
+summary(linear)
+
+# Extract parameter
+a_linear <- coef(linear)[1]
+b_linear<- coef(linear)[2]
+```
+
+#predictions
+```{r}
+y_pred_linear <- a_linear * x_test + b_linear  # Apply the fitted equation
+
+predictions <- data.frame(cbind(predictions, y_pred_linear = y_pred_linear))
+ggplot(predictions) + geom_point(aes(x=x_test, y=y_test)) + geom_line(aes(x=x_test, y = y_pred_linear, col="red"))
+
+```
+
+#-- Non-parametric --
+#modelled flash rate value in each bin was derived using the arithmetic means of the observed flash rate in all 
+#grid cells associated with the corresponding ranges of CAPE × Precip.
+#based on the script Chen shared, there are 50 bins. 
+
+```{r}
+
+# Define binning parameters from the TRAINING SET ONLY
+max_cxp <- max(train$cxp)
+min_cxp <- min(train$cxp)
+nbins <- 50
+bin_size <- (max_cxp - min_cxp) / nbins
+cxp_bin_min <- seq(min_cxp, max_cxp, by = bin_size)
+
+# Bin the TRAINING data
+train <- train %>%
+  mutate(bin_index = cut(cxp, breaks = cxp_bin_min, include.lowest = TRUE, labels = FALSE))
+
+#Compute mean strike rate per bin using TRAINING data
+np_table <- train %>%
+  group_by(bin_index) %>%
+  summarise(strike_bin_means = mean(strikes, na.rm = TRUE)) %>%
+  mutate(cxp_bin_min = cxp_bin_min[bin_index],
+         cxp_bin_max = cxp_bin_min + bin_size)
+
+head(np_table)
+```
+
+```{r}
+# Make predictions for the TEST SET
+predictions <- predictions %>%
+  mutate(bin_index = cut(x_test, breaks = cxp_bin_min, include.lowest = TRUE, labels = FALSE)) %>%
+  left_join(np_table, by = "bin_index")
+
+# Ensure missing bins are handled (e.g., if a test sample falls in an unseen bin)
+predictions$strike_bin_means[is.na(predictions$strike_bin_means)] <- mean(train$strikes, na.rm = TRUE)  # Fill missing bins with global mean
+
+print(predictions)
+
+# Final predictions
+y_pred_np <- predictions$strike_bin_means
+```
+
+```{r}
+predictions <- data.frame(cbind(predictions, y_pred_np = y_pred_np))
+ggplot(predictions) + geom_point(aes(x=x_test, y=y_test)) + geom_line(aes(x=x_test, y = y_pred_np, col="red"))
+
+```
+
+
+# Next get mean of all predictions and calculate RMSE for comparison with bayes models
+Chen eta l. 2021 exclude the linear model. possible reasons include: it does not properly enforce the physical requirement that lightning should be near-zero when CAPE × Precip is near zero. The power law models and the non-parametric approach provide better statistical and physical performance.The power law and non-parametric models adapt well to future climate scenarios because they capture how lightning frequency changes non-linearly with warming.
+A linear model may overestimate lightning at low CAPE × Precip and underestimate it at high CAPE × Precip, leading to systematic errors.
+
+```{r}
+# Compute mean prediction across all models
+y_pred_mean <- (y_pred_pl + y_pred_pl_op + y_pred_sc + y_pred_np) / 4
+
+predictions <- data.frame(cbind(predictions, y_pred_mean = y_pred_mean))
+ggplot(predictions) + geom_point(aes(x=x_test, y=y_test)) + geom_line(aes(x=x_test, y = y_pred_mean, col="red"))
+
+```
+
+#Export table of Predictions
+```{r}
+predictions <- data.frame(cbind(y_pred_pl, y_pred_pl_op, y_pred_sc, y_pred_np, y_pred_mean))
+colnames(predictions) <- c("C1", "C2", "C3", "C4", "C5" )
+
+print(predictions)
+
+write.csv(predictions, file.path(table_file_path, "Chen2021_models_predictions.csv"))
+```
+
+#RMSE
+```{r}
+library(Metrics)  # For RMSE calculation
+
+# Compute RMSE for each model
+rmse_pl <- Metrics::rmse(test$strikes, y_pred_pl)  # Power Law
+rmse_pl_linear_opt <- Metrics::rmse(test$strikes, y_pred_pl_op)  # Power Law (Linear Opt)
+rmse_scale <- Metrics::rmse(test$strikes, y_pred_sc)  # Scale Model
+rmse_np <- Metrics::rmse(test$strikes, y_pred_np)  # Non-Parametric Model
+rmse_mean <- Metrics::rmse(test$strikes, y_pred_mean)  # Mean of all models
+
+# Print results
+cat("RMSE for Power Law Model:", rmse_pl, "\n")
+cat("RMSE for Power Law (Linear Opt) Model:", rmse_pl_linear_opt, "\n")
+cat("RMSE for Scale Model:", rmse_scale, "\n")
+cat("RMSE for Non-Parametric Model:", rmse_np, "\n")
+cat("RMSE for Mean Model (Ensemble):", rmse_mean, "\n")
+
+rmse <- c(rmse_pl, rmse_pl_linear_opt, rmse_scale, rmse_np, rmse_mean)
+```
+
+Pearson Correlation between predicted and observed
+```{r}
+cor_pl <- cor(test$strikes, y_pred_pl)
+cor_pl_op <- cor(test$strikes, y_pred_pl_op)
+cor_sc <- cor(test$strikes, y_pred_sc)
+cor_np <- cor(test$strikes, y_pred_np)
+cor_mean <- cor(test$strikes, y_pred_mean)
+
+cor <- c(cor_pl, cor_pl_op, cor_sc, cor_np, cor_mean)
+```
+
+Calculate skill score from Perkins et al. (2007). 
+```{r}
+calculate_sscore <- function(obs, pred, nbins = 15, plot = FALSE) {
+  # Determine common break points based on the range of both datasets
+  min_val <- min(c(obs, pred))
+  max_val <- max(c(obs, pred))
+  breaks <- seq(min_val, max_val, length.out = nbins + 1)
+  
+  # Compute histograms for observed and predicted data using the same breaks
+  hist_obs <- hist(obs, breaks = breaks, plot = FALSE)
+  hist_pred <- hist(pred, breaks = breaks, plot = FALSE)
+  
+  # Optionally, plot the histograms for visual inspection
+  if (plot) {
+    plot(hist_obs, col = rgb(1, 0, 0, 0.5), main = "Histograms", xlab = "Value")
+    plot(hist_pred, col = rgb(0, 0, 1, 0.5), add = TRUE)
+    legend("topright", legend = c("Observed", "Predicted"),
+           fill = c(rgb(1, 0, 0, 0.5), rgb(0, 0, 1, 0.5)))
+  }
+  
+  # Convert counts to probabilities so that they sum to 1 - for each bin, take the frequency 
+  #(counts in that bin) and divide by total counts to get a proportion - or probability. 
+  prob_obs <- hist_obs$counts / sum(hist_obs$counts)
+  prob_pred <- hist_pred$counts / sum(hist_pred$counts)
+  
+  # Calculate the overlap: the sum over bins of the minimum probability in each bin.
+  sscore <- sum(pmin(prob_obs, prob_pred))
+  
+  return(sscore)
+}
+
+sscore_pl <- calculate_sscore(obs=test$strikes, pred=y_pred_pl, nbins = 15, plot = FALSE)
+sscore_pl_op <- calculate_sscore(obs=test$strikes, pred=y_pred_pl_op, nbins = 15, plot = FALSE)
+sscore_sc <- calculate_sscore(obs=test$strikes, pred=y_pred_sc, nbins = 15, plot = FALSE)
+sscore_np <- calculate_sscore(obs=test$strikes, pred=y_pred_np, nbins = 15, plot = FALSE)
+sscore_mean <- calculate_sscore(obs=test$strikes, pred=y_pred_mean, nbins = 15, plot = FALSE)
+
+cat("S_score for Power Law Model:", sscore_pl, "\n")
+cat("S_score for Power Law (Linear Opt) Model:", sscore_pl_op, "\n")
+cat("S_score for Scale Model:", sscore_sc, "\n")
+cat("S_score for Non-Parametric Model:", sscore_np, "\n")
+cat("S_score for Mean Model (Ensemble):", sscore_mean, "\n")
+
+sscore <- c(sscore_pl, sscore_pl_op, sscore_sc, sscore_np, sscore_mean)
+```
+
+
+Export table of performance metrics
+```{r}
+model_name <- c("C1", "C2", "C3", "C4", "C5" )
+fitting_function <- c("lm", "nls", "lm", "NA", "NA")
+distribution <- c("gaussian", "gaussian", "gaussian", "gaussian", "gaussian" )
+group_name <- c(rep("Chen et al. (2021)", 5))
+predictors <- rep("CAPE x P", 5)
+
+performance <- data.frame(cbind(model_name, fitting_function, distribution, predictors, group_name, rmse, cor, sscore))
+
+print(performance)
+
+write.csv(performance, file.path(table_file_path, "Chen2021_models_performance.csv"))
+```
+
+
+#Get parameter estimates and calculate 95% condience interval (Estimate ± 1.96 × SE)
+```{r}
+# Create parameter estimates table with 95% CI
+format_ci <- function(est, se) {
+  if (is.na(est) || is.na(se)) return(NA)
+  error <- 1.96 * se
+  sprintf("%.3f ± %.3f", est, error)
+}
+
+# Initialize storage
+model_label <- c("C1", "C2", "C3", "C4", "C5")  # C5 (ensemble) is not parametric
+predictors <- rep("CAPE x P", 5)
+model_type <- c("Power Law (log-log)", "Power Law (nls)", "Scale", "Non-Parametric", "Ensemble Mean")
+functional_form <- c("a(CAPE * P)^b","a(CAPE * P)^b","a(CAPE * P)","Non-parametric model","Ensemble mean")
+
+
+a <- b <- rep(NA_character_, 5)
+
+# ---- C1: log-log power law (lm) ----
+summary_pl <- summary(pl)
+a[1] <- format_ci(coef(pl)[1], summary_pl$coefficients[1, 2])
+b[1] <- format_ci(coef(pl)[2], summary_pl$coefficients[2, 2])
+
+# ---- C2: power law (nls) ----
+summary_pl_op <- summary(pl_op)
+a[2] <- format_ci(coef(pl_op)[1], summary_pl_op$coefficients[1, 2])
+b[2] <- format_ci(coef(pl_op)[2], summary_pl_op$coefficients[2, 2])
+
+# ---- C3: scale (lm, y = a * x) ----
+summary_sc <- summary(sc)
+a[3] <- format_ci(coef(sc)[2], summary_sc$coefficients[2, 2])  # slope
+b[3] <- NA  # no intercept
+
+# ---- C4: linear (nls, y = a * x + b) ----
+#summary_linear <- summary(linear)
+#a[4] <- format_ci(coef(linear)[1], summary_linear$coefficients[1, 2])  # a
+#b[4] <- format_ci(coef(linear)[2], summary_linear$coefficients[2, 2])  # b
+
+# Combine into a data frame
+param_table_chen <- data.frame(
+  model_label = model_label,
+  model_type = model_type,
+  predictors = predictors,
+  functional_form = functional_form,
+  a = a,
+  b = b,
+  stringsAsFactors = FALSE
+)
+
+print(param_table_chen)
+
+# Export the parameter table
+write.csv(param_table_chen, file.path(table_file_path, "Table_2.csv"), row.names = FALSE)
+```
