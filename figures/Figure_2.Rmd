@@ -1,0 +1,249 @@
+---
+title: "Figure 2"
+author: "Charlotte Uden"
+date: "2025-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(forcats)
+```
+
+Fig. 2. Comparison of performance across modeling approaches and predictor variables. (a) Root Mean Squared Error (RMSE). (b) Correlation between observed and predicted values. (c) S-score (Perkins et al. 2007). For all plots, the right-most points indicate the best performing model (the x-axis of plot (a) has been reversed to reflect this). The y-axis of each plot contains the climate variables that a given model predicts lightning strike rate from, including convective available potential energy (CAPE), precipitation (P), relative humidity (RH), shortwave radiation (SWR), temperature (T), surface pressure (SP), precipitation (P), and wind (W). Color indicates modeling approach; see Table 1 for model descriptions and definitions. All metrics were calculated using the test data. 
+
+Load configuration files
+- location of table of performance metrics exported from each model set's .Rmd file. 
+- location to store the figure
+```{r}
+read_properties <- function(file_path) {
+  lines <- readLines(file_path)
+  lines <- lines[grepl("=", lines)]  # only keep lines with key-value pairs
+  key_vals <- strsplit(lines, "=")
+  props <- setNames(
+    trimws(sapply(key_vals, `[`, 2)),
+    trimws(sapply(key_vals, `[`, 1))
+  )
+  return(props)
+}
+
+config <- read_properties("/raid/cuden/config_files/lightning_config.properties")  # path to config file
+
+# Extract values from config
+table_root <- config[["table_root"]] 
+figure_root <- config[["figure_root"]]
+
+# Use the values to build full paths
+Chen2021_file_path <- file.path(table_root, "Chen2021_models_performance.csv")
+lm_file_path <- file.path(table_root, "Linear_Model_performance.csv")
+glm_file_path <- file.path(table_root, "Gamma_GLM_performance.csv")
+bayes_file_path <- file.path(table_root, "bayes_gamma_model_performance.csv")
+```
+
+Tables of performance metrics exported from scripts for each modeling approach:
+```{r}
+#read in the data
+chen_performance <- read.csv(Chen2021_file_path)[,2:9]
+lm_performance <- read.csv(lm_file_path)[,2:9]
+glm_performance <- read.csv(glm_file_path)[,2:9]
+bayes_performance <- read.csv(bayes_file_path)[,2:9]
+
+#ensure consitant column naming
+names(chen_performance) <- c("model_name","fitting_function","distribution","predictors","group_name","rmse","cor","sscore")
+names(lm_performance) <- c("model_name","fitting_function","distribution","predictors","group_name","rmse","cor","sscore")
+names(glm_performance) <- c("model_name","fitting_function","distribution","predictors","group_name","rmse","cor","sscore")
+names(bayes_performance) <- c("model_name","fitting_function","distribution","predictors","group_name","rmse","cor","sscore")
+
+df <- rbind(chen_performance, lm_performance, glm_performance, bayes_performance)
+print(df)
+```
+
+```{r}
+df <- df %>%
+  mutate(group_name = case_when(
+    group_name == "Chen et al. (2021)" ~ "Chen et al. (2021): C1-C5",
+    group_name == "Linear Model" ~ "Linear Model: N1-N13",
+    group_name == "Gamma GLM" ~ "Gamma GLM: G1-G13",
+    group_name == "Gamma Bayesian" ~ "Gamma Bayesian: B1-B13",
+    TRUE ~ group_name  # Keeps other values unchanged
+  ))
+
+df <- df %>%
+  mutate(predictors = case_when(
+    predictors == "SWR + T + RH + W + + P" ~ "SWR + T + RH + W + P",
+    TRUE ~ predictors))
+
+df <- df %>%
+  mutate(predictors = case_when(
+    predictors == "S" ~ "P",
+    TRUE ~ predictors  # Keeps other values unchanged
+  ))
+
+
+library(forcats)
+df$predictors <- fct_inorder(df$predictors)  # Maintain original order
+df$group_name <- fct_inorder(df$group_name)  # Maintain original order
+
+head(df)
+```
+
+
+```{r}
+#need Chen 2021 models to be plot on their own row:
+df <- df %>%
+  mutate(predictors_mod = as.character(predictors)) %>%
+  mutate(predictors_mod = ifelse(group_name =="Chen et al. (2021): C1-C5", " CAPE x P", predictors_mod))
+
+df$predictors_mod <- fct_inorder(df$predictors_mod)  # Maintain original order
+```
+
+Modify model labels for clarity:
+```{r}
+df <- df %>%
+  mutate(predictors_model_name = case_when(
+    predictors_mod == " CAPE x P" ~ "CAPE x P (C1-C5)",
+    predictors_mod == "CAPE" ~ "CAPE (N/G/B 1)",
+    predictors_mod == "CAPE x P" ~ " CAPE x P (N/G/B 2)",
+    predictors_mod == "RH" ~ "RH (N/G/B 3)",
+    predictors_mod == "SWR" ~ "SWR (N/G/B 4)",
+    predictors_mod == "T" ~ "T (N/G/B 5)",
+    predictors_mod == "SP" ~ "SP (N/G/B 6)",
+    predictors_mod == "P" ~ "P (N/G/B 7)",
+    predictors_mod == "W" ~ "W (N/G/B 8)",
+    predictors_mod == "SWR + T" ~ "SWR + T (N/G/B 9)",
+    predictors_mod == "SWR + T + RH" ~ "SWR + T + RH (N/G/B 10)",
+    predictors_mod == "SWR + T + RH + W" ~ "SWR + T + RH + W (N/G/B 11)",
+    predictors_mod == "SWR + T + RH + W + P" ~ "SWR + T + RH + W + P (N/G/B 12)",
+    predictors_mod == "SWR + T + RH + W + P + SP" ~ "SWR + T + RH + W + P + SP (N/G/B 13)",
+    TRUE ~ predictors_mod))
+
+df$predictors_model_name <- fct_inorder(df$predictors_model_name)  # Maintain original order
+```
+
+
+```{r}
+
+
+p1 <- ggplot(df) +
+  geom_point(aes(x = rmse, y = predictors_model_name, col=group_name, size = 3, shape=group_name)) + 
+  labs(x = "RMSE", y = "") +
+  theme_minimal() +
+  scale_x_reverse() +
+  scale_color_manual(values = c("Chen et al. (2021): C1-C5" = "gold", "Linear Model: N1-N13" = "purple4", "Gamma GLM: G1-G13" = "magenta3", "Gamma Bayesian: B1-B13" = "orange")) +
+  scale_shape_manual(values = c(
+  "Chen et al. (2021): C1-C5" = 16,   # Solid circle
+  "Linear Model: N1-N13" = 17,         # Solid triangle
+  "Gamma GLM: G1-G13" = 15,            # Solid square
+  "Gamma Bayesian: B1-B13" = 18        # Solid diamond
+)) + 
+  theme(axis.text.x = element_text(size=10),
+        plot.title = element_text(size = 13),
+        axis.title.x = element_text(size = 13),
+        axis.title.y = element_text(size = 13),
+        axis.text.y = element_text(size = 10),
+        legend.text = element_text(size = 13),
+        legend.title = element_text(size = 13),
+        legend.position = "none",
+        panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+        panel.grid.minor = element_line(color = "darkgray", size = 0.2)) +
+  ggtitle("(a)") 
+
+p2 <- ggplot(df) +
+  geom_point(aes(x = cor, y = predictors_model_name, col=group_name, size = 3, shape=group_name)) + 
+  labs(x = "Correlation", y = "") +
+  theme_minimal() +
+  scale_color_manual(values = c("Chen et al. (2021): C1-C5" = "gold", "Linear Model: N1-N13" = "purple4", "Gamma GLM: G1-G13" = "magenta3", "Gamma Bayesian: B1-B13" = "orange")) +
+  scale_shape_manual(values = c(
+  "Chen et al. (2021): C1-C5" = 16,   # Solid circle
+  "Linear Model: N1-N13" = 17,         # Solid triangle
+  "Gamma GLM: G1-G13" = 15,            # Solid square
+  "Gamma Bayesian: B1-B13" = 18        # Solid diamond
+)) + 
+  theme(axis.text.x = element_text(size=10),
+        plot.title = element_text(size = 13),
+        axis.title.x = element_text(size = 13),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        legend.position = "none",
+        panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+        panel.grid.minor = element_line(color = "darkgray", size = 0.2)) +
+  ggtitle("(b)") 
+
+p3 <- ggplot(df) +
+  geom_point(aes(x = sscore, y = predictors_model_name, col=group_name, size = 3, shape=group_name)) + 
+  labs(x = "S-score", y = "") +
+  theme_minimal() +
+  scale_color_manual(values = c("Chen et al. (2021): C1-C5" = "gold", "Linear Model: N1-N13" = "purple4", "Gamma GLM: G1-G13" = "magenta3", "Gamma Bayesian: B1-B13" = "orange")) +
+  scale_shape_manual(values = c(
+  "Chen et al. (2021): C1-C5" = 16,   # Solid circle
+  "Linear Model: N1-N13" = 17,         # Solid triangle
+  "Gamma GLM: G1-G13" = 15,            # Solid square
+  "Gamma Bayesian: B1-B13" = 18        # Solid diamond
+)) +
+  theme(axis.text.x = element_text(size=10),
+        plot.title = element_text(size = 13),
+        axis.title.x = element_text(size = 13),
+        #axis.title.y = element_text(size = 13),
+        #axis.text.y = element_text(size = 11),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 13),
+        legend.position = "none",
+        panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+        panel.grid.minor = element_line(color = "darkgray", size = 0.2)) +
+  ggtitle("(c)") 
+
+# Function to extract the legend from a ggplot object
+extract_legend <- function(my_plot) {
+  g <- ggplotGrob(my_plot)  # Convert plot to grob
+  legend <- g$grobs[which(sapply(g$grobs, function(x) x$name) == "guide-box")][[1]]
+  return(legend)  # Returns the legend as a grob
+}
+
+# Create a dummy plot (use any one of your plots that contains a legend)
+legend_plot <- ggplot(df) +
+  geom_point(aes(x = sscore, y = predictors_mod, col=group_name, size = 3, shape=group_name)) + 
+  labs(x = "S-score", y = "") +
+  theme_minimal() +
+  scale_color_manual(values = c("Chen et al. (2021): C1-C5" = "gold", "Linear Model: N1-N13" = "purple4", "Gamma GLM: G1-G13" = "magenta3", "Gamma Bayesian: B1-B13" = "orange")) +
+  scale_shape_manual(values = c(
+  "Chen et al. (2021): C1-C5" = 16,   # Solid circle
+  "Linear Model: N1-N13" = 17,         # Solid triangle
+  "Gamma GLM: G1-G13" = 15,            # Solid square
+  "Gamma Bayesian: B1-B13" = 18        # Solid diamond
+)) +
+  guides(size = FALSE,
+         color = guide_legend(override.aes = list(size = 5)),
+         shape = guide_legend(override.aes = list(size = 5))) +
+  theme(legend.position = "top",
+    axis.text.x = element_text(angle = 45, hjust = 1, size=13),
+    plot.title = element_text(size = 13),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    legend.key.width = unit(1.5, "cm"),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2)) +
+  ggtitle("(e)") 
+
+# Extract the legend
+legend_grob <- extract_legend(legend_plot)
+
+empty_plot <- grid::nullGrob()
+
+grid.arrange(p1,p2,p3, empty_plot, legend_grob, nrow=2, ncol=3, heights=c(1,0.2), widths=c(1.75, 1, 1))
+
+p <- grid.arrange(p1,p2,p3, empty_plot, legend_grob, nrow=2, ncol=3, heights=c(1,0.2), widths=c(1.75, 1, 1))
+
+ggsave(file.path(figure_root, "Figure_2.jpg"), plot = p, width = 12, height = 4, dpi = 1100, units = "in")
+```
+
+

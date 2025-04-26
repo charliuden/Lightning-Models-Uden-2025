@@ -1,0 +1,240 @@
+---
+title: "Figure 5"
+author: "Charlotte Uden"
+date: "2025-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(gridExtra)
+```
+Fig. 4. Spatial comparison of observed and predicted lightning strike rates. Raster cells are colored by lightning strike rate (strikes/km2/month) averaged across six summers (2005 - 2010) of observed data and predictions from models N13, G13, and B13. See table 1 for model descriptions and definitions. All data are from the test set; white raster cells indicate latitude/longitude points not included in the test data due to the random splitting of the data into train (80%) and test (20%) sets.
+
+Load configuration files
+- location of the observed data (model drivers)
+- location of table of model predictions exported from each model set's .Rmd file. 
+- location to store the figure
+```{r}
+read_properties <- function(file_path) {
+  lines <- readLines(file_path)
+  lines <- lines[grepl("=", lines)]  # only keep lines with key-value pairs
+  key_vals <- strsplit(lines, "=")
+  props <- setNames(
+    trimws(sapply(key_vals, `[`, 2)),
+    trimws(sapply(key_vals, `[`, 1))
+  )
+  return(props)
+}
+
+config <- read_properties("/raid/cuden/config_files/lightning_config.properties")  # path to config file
+
+# Extract values from config
+data_root <- config[["data_root"]] 
+table_root <- config[["table_root"]] 
+figure_root <- config[["figure_root"]]
+
+# Use the values to build full paths
+Chen2021_file_path <- file.path(table_root, "Chen2021_models_predictions.csv")
+lm_file_path <- file.path(table_root, "Linear_Model_predictions.csv")
+glm_file_path <- file.path(table_root, "Gamma_GLM_predictions.csv")
+bayes_file_path <- file.path(table_root, "bayes_gamma_model_predictions.csv")
+monthly_drivers_file_path <- file.path(data_root, "era5_vaisalaLightning_monthlySummerSummaries_2005-2010_NEclip.csv")
+```
+
+```{r}
+#read in the data
+chen_predictions <- read.csv(Chen2021_file_path)[,2:6]
+lm_predictions <- read.csv(lm_file_path)[,2:14]
+glm_predictions <- read.csv(glm_file_path)[,2:14]
+bayes_predictions <- read.csv(bayes_file_path)[,2:14]
+```
+
+Observed data - need to be split back into test and train sets because the above predictions are made from the test set. 
+```{r}
+data <- read.csv(monthly_drivers_file_path)
+data <- data[2:13]
+sample_size <- floor(0.8 * nrow(data))
+
+## set the seed to make partition reproducible
+set.seed(123)
+train_index <- sample(seq_len(nrow(data)), size = sample_size)
+
+train <- data[train_index, ]
+test <- data[-train_index, ]
+
+```
+
+Combine into one dataframe. Note that N13, G13, and B13 are used because they combine all size near-surface variables and are the best performing models within each of their respective model sets. 
+```{r}
+map_data <- data.frame(
+  lat = test$lat,
+  lon = test$lon,
+  observed = test$strikes,
+  N13 = lm_predictions$N13,
+  G13 = glm_predictions$G13,
+  B13 = bayes_predictions$y_pred_B13
+)
+
+head(map_data)
+```
+
+Plot observed and predicted strike rates over a map:
+```{r}
+# get new england and new york polygons from mapdata library :
+states <- map_data("state")#turn state line map into data frame
+northeast <- subset(states, region %in% c("vermont", "new hampshire", "connecticut", "maine", "rhode island", "massachusetts", "new york"))#subest northeastern states
+
+map <- geom_polygon(data = northeast, aes(x=long, y = lat, group = group), fill = NA, color = "black", size=0.2) 
+
+# Find the global min and max values across all datasets for consistent color scale
+min_value <- min(c(map_data$observed, map_data$N13, map_data$G13, map_data$B13), na.rm = TRUE)
+max_value <- max(c(map_data$observed, map_data$N13, map_data$G13, map_data$B13), na.rm = TRUE)
+
+#get average observed value for each lat lon combo
+avg_observed_data <- map_data %>%
+  group_by(lat, lon) %>%
+  summarize(avg_observed = mean(observed, na.rm = TRUE), .groups = "drop")
+
+map_obs <- ggplot(avg_observed_data, 
+                      aes(x = lon, y = lat, fill = avg_observed)) +
+  geom_raster() +
+  scale_fill_viridis_c(
+    option = "plasma",  # Default Viridis color scale (use "cividis" or "plasma" if needed)
+    direction = -1,
+    name = expression(Lightning~Strike~Rate),
+    limits = c(min_value, max_value),  # Keep consistent scale
+    guide = guide_colorbar(direction = "horizontal", title.position = "top")
+  ) +
+  xlab("Lon") +
+  ylab("Lat") +
+  theme_minimal() +
+  ggtitle("Observed") +
+   theme(
+     axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.position = c(0.05, 0.95),  # Position: top-left
+    legend.justification = c("left", "top"),  # Align top-left corner
+    legend.background = element_rect(fill = "white", color = "black", size = 0.1),
+    plot.title = element_text(size = 13, hjust = 0),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2)
+  ) + map
+
+# Map plots for each model
+avg_pred_N13 <- map_data %>%
+  group_by(lat, lon) %>%
+  summarize(avg_pred = mean(N13, na.rm = TRUE), .groups = "drop")
+
+map_pred_N13 <- ggplot(avg_pred_N13, 
+                      aes(x = lon, y = lat, fill = avg_pred)) +
+  geom_raster() +
+  scale_fill_viridis_c(
+    option = "plasma",  # Default Viridis color scale (use "cividis" or "plasma" if needed)
+    direction = -1,
+    name = expression(Lightning~Strike~Rate),
+    limits = c(min_value, max_value),  # Keep consistent scale
+    guide = guide_colorbar(direction = "horizontal", title.position = "top")
+  ) +
+  xlab("Lon") +
+  ylab("Lat") +
+  theme_minimal() +
+  ggtitle("Predicted: N13") +
+   theme(
+     axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.position = c(0.05, 0.95),  # Position: top-left
+    legend.justification = c("left", "top"),  # Align top-left corner
+    legend.background = element_rect(fill = "white", color = "darkgray", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2)
+  ) + map
+
+avg_pred_G13 <- map_data %>%
+  group_by(lat, lon) %>%
+  summarize(avg_observed = mean(G13, na.rm = TRUE), .groups = "drop")
+
+map_pred_G13 <- ggplot(avg_pred_G13, 
+                      aes(x = lon, y = lat, fill = avg_observed)) +
+  geom_raster() +
+  scale_fill_viridis_c(
+    option = "plasma",  # Default Viridis color scale (use "cividis" or "plasma" if needed)
+    direction = -1,
+    name = expression(Lightning~Strike~Rate),
+    limits = c(min_value, max_value),  # Keep consistent scale
+    guide = guide_colorbar(direction = "horizontal", title.position = "top")
+  ) +
+  xlab("Lon") +
+  ylab("Lat") +
+  theme_minimal() +
+  ggtitle("Predicted: G13") +
+   theme(
+     axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.position = c(0.05, 0.95),  # Position: top-left
+    legend.justification = c("left", "top"),  # Align top-left corner
+    legend.background = element_rect(fill = "white", color = "darkgray", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2)
+  ) + map
+
+avg_pred_B13 <- map_data %>%
+  group_by(lat, lon) %>%
+  summarize(avg_observed = mean(B13, na.rm = TRUE), .groups = "drop")
+
+map_pred_B13 <- ggplot(avg_pred_B13, 
+                      aes(x = lon, y = lat, fill = avg_observed)) +
+  geom_raster() +
+  scale_fill_viridis_c(
+    option = "plasma",  # Default Viridis color scale (use "cividis" or "plasma" if needed)
+    direction = -1,
+    name = expression(Lightning~Strike~Rate),
+    limits = c(min_value, max_value),  # Keep consistent scale
+    guide = guide_colorbar(direction = "horizontal", title.position = "top")
+  ) +
+  xlab("Lon") +
+  ylab("Lat") +
+  theme_minimal() +
+  ggtitle("Predicted: B13") +
+   theme(
+     axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.position = c(0.05, 0.95),  # Position: top-left
+    legend.justification = c("left", "top"),  # Align top-left corner
+    legend.background = element_rect(fill = "white", color = "darkgray", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2)
+  ) + map
+
+(map_obs | map_pred_N13) / (map_pred_G13 | map_pred_B13)
+
+ggsave(file.path(figure_root, "Figure_4.jpg"), plot = last_plot(), width = 12, height = 10, dpi = 750)
+```
+
+
+

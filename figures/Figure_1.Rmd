@@ -1,0 +1,509 @@
+---
+title: "Figure 1"
+author: "Charlotte Uden"
+date: "2025-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(ggpointdensity)
+library(viridis)
+library(terra)
+```
+
+Fig 1. Spatial and temporal distribution of lightning and climate data. Plots include (a) cloud-to-ground lightning strike rates (strikes/km2/month) across the Northeastern US for 2005 - 2010 plotted against month, and mapped (b) cloud-to-ground lightning strike rate (strikes/km2/month), (c) CAPE (J/kg), (d) CAPE x Precipitation (W/m2), (e) Temperature (Celsius), (f) Wind speed (m/s), (g) Short-wave radiation (W/m2), (h) Surface pressure (Pa), (i) Relative humidity (%), and (j) Precipitation (kg/m2/s). Mapped values are for summer months (May - September), averaged across the 2005-2010 training period. All variables excluding the target (lightning strike rate) are standardized. Lightning data are derived from the Vaisala Lightning Database and climate data come from the ERA5 climate reanalysis product (Vaisala, Inc.; Hersbach et al. 2020). 
+
+Load configuration files
+- location of climate and lighting drivers
+- location to store the figure
+```{r}
+read_properties <- function(file_path) {
+  lines <- readLines(file_path)
+  lines <- lines[grepl("=", lines)]  # only keep lines with key-value pairs
+  key_vals <- strsplit(lines, "=")
+  props <- setNames(
+    trimws(sapply(key_vals, `[`, 2)),
+    trimws(sapply(key_vals, `[`, 1))
+  )
+  return(props)
+}
+
+config <- read_properties("/raid/cuden/config_files/lightning_config.properties")  # path to config file
+
+# Extract values from config
+data_root <- config[["data_root"]] #path to drivers
+figure_root <- config[["figure_root"]] #path to wherever you want to save figures
+
+# Use the values to build full paths
+daily_drivers_file_path <- file.path(data_root, "era5DailySummaries_vaisalaLightningDailyCounts_2005-2010_NEclip.csv")
+monthly_drivers_file_path <- file.path(data_root, "era5_vaisalaLightning_monthlySummerSummaries_2005-2010_NEclip.csv")
+```
+
+
+Read in daily strike count data:
+```{r}
+#daily data with lat lon and date
+df <- read.csv(daily_drivers_file_path)
+df <- df[,2:16]
+```
+
+In order to calculate strikes/km2/month from a daily strike count, you need to find the area of each gridcell:
+```{r}
+#get map of the Northeast
+states <- map_data("state")#turn state line map into data frame
+new_england <- subset(states, region %in% c("vermont", "new hampshire", "connecticut", "maine", "rhode island", "massachusetts", "new york"))#subest ne$
+map <- ggplot() + geom_polygon(data = new_england, aes(x=long, y=lat, group = group), color="white", fill="lightgray") + coord_fixed(1.3)
+
+#convert points to raster and set crs
+
+#get grid
+points <- filter(df, date=="2008-06-01")
+map + geom_point(data=points, aes(x=lon, y=lat, size=cape, col=strikes))
+
+#add unique id to each point
+points$id <- seq(1:nrow(points))
+#concert to raster 
+r <- rast(points[,c("lon", "lat", "cape")])
+plot(r)
+crs(r) <- "+init=epsg:4326"
+#now make a raster that includes the id column
+r <- rast(points[,c("lon", "lat", "id")])
+plot(r)
+crs(r) <- "+init=epsg:4326"
+#convert to polygons
+p = as.polygons(r, aggregate=FALSE) #if aggregate=false, each raster cell is a polygon 
+plot(p)    
+#get area of each polygon
+area <- expanse(p, unit="km", transform=T) #	If transform=TRUE, planar CRS are transformed to lon/lat for accuracy. can also use "m" instead of "km"
+p$area <- area
+
+plot(p, "area")
+plot(p, "id")
+
+d <- data.frame(values(p))
+head(d)
+
+#merge grid and area values by id
+d <- merge(points[,c("lat", "lon", "id")], d, by="id")
+
+#merge area values with data by lat lon
+df <- left_join(df, d, by=c("lat", "lon"))
+
+#map to check it worked
+points <- filter(df, date=="2008-06-01")
+map + geom_point(data=points, aes(x=lon, y=lat, size=cape, col=strikes))
+map + geom_point(data=points, aes(x=lon, y=lat, col=as.factor(area)))
+
+```
+Calculate strike rate for each month:
+```{r}
+df$date <- as.Date(df$date)
+df$month <- as.numeric(format(df$date,'%m'))
+df$year <- as.numeric(format(df$date,'%Y'))
+df$day <- as.numeric(format(df$date,'%d'))
+df$week <- week(df$date)
+
+cols <- c("lon", "lat", "year", "month", "area")
+
+#sum strike count for each summer month 
+summary_strikes <- df %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(strikes_monthly_sum = sum(strikes), .groups = 'drop')
+
+#calculate strike rate for each month (km-2 month-1)
+summary_strikes <- mutate(summary_strikes, strike_rate = strikes_monthly_sum/area)
+
+print(summary_strikes)
+```
+Plot strike rates for each month:
+```{r}
+summary_strikes$strike_rate <- as.numeric(summary_strikes$strike_rate)
+
+# Convert month number to factor with month abbreviations
+summary_strikes <- summary_strikes %>%
+  mutate(month_name = factor(month, levels = 1:12, labels = month.abb))
+
+p1 <- ggplot(summary_strikes, aes(x = month_name, y = strike_rate)) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1, color = "black") +
+  geom_boxplot(outlier.shape = NA, width = 0.4, fill = "white", color = "white", alpha = 0.1) +  # no outliers shown
+  labs(x = "", y = "Strikes / km² / month", title="(a)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 13),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    panel.grid.major = element_line(color = "black", size = 0.05), 
+    panel.grid.minor = element_line(color = "black", size = 0.01),
+    legend.position = "none"
+  )
+
+p1
+```
+
+
+Maps of each climate variable. First get the base map:
+```{r}
+#get map of the NE
+library(mapdata)
+# get new england and new york polygons from mapdata library :
+states <- map_data("state")#turn state line map into data frame
+northeast <- subset(states, region %in% c("vermont", "new hampshire", "connecticut", "maine", "rhode island", "massachusetts", "new york"))#subest northeastern states
+
+# plot state polygons and PalEON grid, just to see what we are working with:
+map <- geom_polygon(data = northeast, aes(x=long, y = lat, group = group), fill = NA, color = "black", size=0.2) 
+```
+
+Need the monthly summary data used to drive the models:
+```{r}
+#monthly averages
+data <- read.csv(monthly_drivers_file_path)
+
+#standardize the data
+data <- data %>%
+  mutate(cape = ((cape-mean(cape))/sd(cape))) %>%
+  mutate(precip = ((precip-mean(precip))/sd(precip))) %>%
+  mutate(cxp = ((cxp-mean(cxp))/sd(cxp))) %>%
+  mutate(tair = ((tair-mean(tair))/sd(tair))) %>%
+  mutate(wind = ((wind-mean(wind))/sd(wind))) %>%
+  mutate(swr = ((swr-mean(swr))/sd(swr))) %>%
+  mutate(sp = ((sp-mean(sp))/sd(sp))) %>%
+  mutate(rh = ((rh-mean(rh))/sd(rh)))
+
+#calculate mean values across years
+cols <- c("lon", "lat")
+
+#Lightning strike Rate
+summary_strike <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(strikes = mean(strikes), .groups = 'drop')
+```
+
+Add each climate variable to the map:
+```{r}
+library(terra)
+r <- rast(summary_strike[,c("lon", "lat", "strikes")])
+plot(r)
+crs(r) <- "+init=epsg:4326"
+
+p_lightning <- ggplot() + 
+  geom_raster(data = summary_strike, aes(x = lon, y = lat, fill = strikes)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "Lightning  ")) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal"
+  ) + ggtitle("(b)") + map +
+  xlab("Lon") + ylab("Lat")
+
+p_lightning
+
+
+#CAPE
+summary_cape <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(cape = mean(cape), .groups = 'drop')
+
+r <- rast(summary_cape[,c("lon", "lat", "cape")])
+plot(r)
+crs(r) <- "+init=epsg:4326"
+
+p_cape <- ggplot() + 
+  geom_raster(data = summary_cape, aes(x = lon, y = lat, fill = cape)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "CAPE  ")) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal"
+  ) + ggtitle("(c)") + map+
+  xlab("Lon") + ylab("Lat")
+
+p_cape
+
+#CAPE x Precipitation
+summary_cxp <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(cxp = mean(cxp), .groups = 'drop')
+
+r <- rast(summary_cxp[,c("lon", "lat", "cxp")])
+plot(r)
+crs(r) <- "+init=epsg:4326"
+
+p_cxp <- ggplot() + 
+  geom_raster(data = summary_cxp, aes(x = lon, y = lat, fill = cxp)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "CAPE x Precip  ")) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal") +
+  ggtitle("(d)") + map+
+  xlab("Lon") + ylab("Lat")
+p_cxp
+
+#Temperature
+summary_temp <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(tair = mean(tair), .groups = 'drop')
+
+p_temp <- ggplot() + 
+  geom_raster(data=summary_temp, aes(x=lon, y=lat, fill=tair)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "Temp  ")) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal") +
+  ggtitle("(e)") + map +
+  xlab("Lon") + ylab("Lat")
+
+p_temp
+
+
+#Wind
+summary_wind <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(wind = mean(wind), .groups = 'drop')
+
+p_wind <- ggplot() + 
+  geom_raster(data=summary_wind, aes(x=lon, y=lat, fill=wind)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "Wind  ")) + 
+  theme_minimal() +
+  theme(
+       axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal"
+  ) +
+  ggtitle("(f)") + map+
+  xlab("Lon") + ylab("Lat")
+
+p_wind
+
+#Short-wave radiation
+summary_radiation <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(swr = mean(swr), .groups = 'drop')
+
+p_radiation <- ggplot() + 
+  geom_raster(data=summary_radiation, aes(x=lon, y=lat, fill=swr)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "Radiation  ")) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal"
+  ) +
+  ggtitle("(g)") + map+
+  xlab("Lon") + ylab("Lat")
+
+p_radiation
+
+#Surface Pressure
+summary_sp <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(sp = mean(sp), .groups = 'drop')
+
+p_sp <- ggplot() + 
+  geom_raster(data=summary_sp, aes(x=lon, y=lat, fill=sp)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "Pressure  ")) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal"
+  ) +
+  ggtitle("(h)") + map+
+  xlab("Lon") + ylab("Lat")
+
+p_sp
+
+#Relative humidity
+summary_rh <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(rh = mean(rh), .groups = 'drop')
+
+p_rh <- ggplot() + 
+  geom_raster(data=summary_rh, aes(x=lon, y=lat, fill=rh)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "Humidity  ")) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal"
+  ) + 
+  ggtitle("(i)") + map+
+  xlab("Lon") + ylab("Lat")
+
+p_rh
+
+#Precipitation
+summary_precip <- data %>% 
+  group_by(across(all_of(cols))) %>% 
+  summarize(precip = mean(precip), .groups = 'drop')
+
+p_precip <- ggplot() + 
+  geom_raster(data=summary_precip, aes(x=lon, y=lat, fill=precip)) + 
+  scale_fill_viridis_c(option = "viridis") +
+  guides(fill = guide_legend(title = "Precip  ")) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13),
+    legend.background = element_rect(fill = "white", color = "white", size = 0.2),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2),
+    legend.key.size = unit(0.4, 'cm'),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    legend.title.align = 0,
+    legend.position = "bottom", 
+    legend.justification = "left",
+    legend.direction = "horizontal"
+  ) +
+  ggtitle("") +
+  ggtitle("(j)") + map+
+  xlab("Lon") + ylab("Lat")
+
+p_precip
+
+# Create a layout matrix:
+# The first row has all cells set to 1 (so p1 occupies the full top row),
+# and the next rows assign the remaining plots in order.
+layout_matrix <- rbind(
+  c(1, 1, 1),       # Row 1: p1 spans all three columns
+  c(2, 3, 4),       # Row 2: next three plots
+  c(5, 6, 7),       # Row 3: following three plots
+  c(8, 9, 10)       # Row 4: last three plots
+)
+
+# Arrange the plots using grid.arrange with the custom layout:
+grid.arrange(p1, p_lightning, p_cape, p_cxp, p_temp, 
+                  p_wind, p_radiation, p_sp, p_rh, p_precip,
+                  layout_matrix = layout_matrix)
+
+p <- grid.arrange(p1, p_lightning, p_cape, p_cxp, p_temp, 
+                  p_wind, p_radiation, p_sp, p_rh, p_precip,
+                  layout_matrix = layout_matrix)
+
+
+ggsave(file.path(figure_root, "Figure_1.jpg"), plot = p, width = 12, height = 14, dpi = 750, limitsize = FALSE)
+```
+
+
+

@@ -1,0 +1,162 @@
+---
+title: "Figure 4"
+author: "Charlotte Uden"
+date: "2025-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(gridExtra)
+```
+
+Fig. 5. Observed versus predicted lightning strike rates. The dotted 1:1 line indicates perfect model performance. All axes are in units of lightning strikes/km2/month. The x-axis in each plot shows the observed strike rates, while the y-axes are predictions from (a) model N13, (b) model G13, and (c) model B13. 
+
+Load configuration files
+- location of the observed data (model drivers)
+- location of table of model predictions exported from each model set's .Rmd file. 
+- location to store the figure
+```{r}
+read_properties <- function(file_path) {
+  lines <- readLines(file_path)
+  lines <- lines[grepl("=", lines)]  # only keep lines with key-value pairs
+  key_vals <- strsplit(lines, "=")
+  props <- setNames(
+    trimws(sapply(key_vals, `[`, 2)),
+    trimws(sapply(key_vals, `[`, 1))
+  )
+  return(props)
+}
+
+config <- read_properties("/raid/cuden/config_files/lightning_config.properties")  # path to config file
+
+# Extract values from config
+data_root <- config[["data_root"]] 
+table_root <- config[["table_root"]] 
+figure_root <- config[["figure_root"]]
+
+# Use the values to build full paths
+Chen2021_file_path <- file.path(table_root, "Chen2021_models_predictions.csv")
+lm_file_path <- file.path(table_root, "Linear_Model_predictions.csv")
+glm_file_path <- file.path(table_root, "Gamma_GLM_predictions.csv")
+bayes_file_path <- file.path(table_root, "bayes_gamma_model_predictions.csv")
+monthly_drivers_file_path <- file.path(data_root, "era5_vaisalaLightning_monthlySummerSummaries_2005-2010_NEclip.csv")
+```
+
+```{r}
+#read in the data
+chen_predictions <- read.csv(Chen2021_file_path)[,2:6]
+lm_predictions <- read.csv(lm_file_path)[,2:14]
+glm_predictions <- read.csv(glm_file_path)[,2:14]
+bayes_predictions <- read.csv(bayes_file_path)[,2:14]
+```
+
+Observed data - need to be split back into test and train sets because the above predictions are made from the test set. 
+```{r}
+data <- read.csv(monthly_drivers_file_path)
+data <- data[2:13]
+sample_size <- floor(0.8 * nrow(data))
+
+## set the seed to make partition reproducible
+set.seed(123)
+train_index <- sample(seq_len(nrow(data)), size = sample_size)
+
+train <- data[train_index, ]
+test <- data[-train_index, ]
+
+```
+
+Combine into one data frame. Note that N13, G13, and B13 are used because they combine all size near-surface variables and are the best performing models within each of their respective model sets. 
+```{r}
+df <- data.frame(
+  Observed = test$strikes,
+  N13 = lm_predictions$N13,
+  G13 = glm_predictions$G13,
+  B13 = bayes_predictions$y_pred_B13
+)
+
+head(df)
+```
+
+```{r}
+p1 <- ggplot(data=df, aes(x=Observed, y=N13, alpha=0.7)) +
+  geom_point() +
+  xlim(0, 1.35) +
+  ylim(-0.07, 1.35) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted", color = "black") +
+  labs(title = "(a)",
+       x = "Observed",
+       y = "Predicted: N13") +
+  guides(alpha = FALSE) +
+  theme_minimal() +
+  theme(
+     axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2)) 
+  
+p1
+
+```
+
+```{r}
+p2 <- ggplot(data=df, aes(x=Observed, y=G13, alpha=0.7)) +
+  geom_point() +
+  xlim(0, 1.35) +
+  ylim(-0.07, 1.35) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted", color = "black") +
+  labs(title = "(b)",
+       x = "Observed",
+       y = "Predicted: G13") +
+  guides(alpha = FALSE) +
+  theme_minimal() +
+  theme(
+     axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2)) 
+  
+p2
+
+```
+
+```{r}
+p3 <- ggplot(data=df, aes(x=Observed, y=B13, alpha=0.7)) +
+  geom_point() +
+  xlim(0, 1.35) +
+  ylim(-0.07, 1.35) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted", color = "black") +
+  labs(title = "(c)",
+       x = "Observed",
+       y = "Predicted: B13") +
+  guides(alpha = FALSE) +
+  theme_minimal() +
+  theme(
+     axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(size = 13, hjust = 0),
+    panel.grid.major = element_line(color = "darkgray", size = 0.2), 
+    panel.grid.minor = element_line(color = "darkgray", size = 0.2)) 
+  
+p3
+
+```
+
+```{r}
+p1 | p2 |p3
+ggsave(file.path(figure_root, "Figure_5.jpg"), plot = last_plot(), width = 12, height = 4, dpi = 750)
+```
