@@ -34,7 +34,7 @@ read_properties <- function(file_path) {
   return(props)
 }
 
-config <- read_properties("/raid/cuden/config_files/lightning_config.properties")  # path to config file
+config <- read_properties("/path/to/config/file/my_config.properties")  # path to your config file
 
 # Extract values from config
 data_root <- config[["data_root"]] 
