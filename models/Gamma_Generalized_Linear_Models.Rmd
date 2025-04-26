@@ -39,7 +39,7 @@ data_root <- config[["data_root"]]
 table_file_path <- config[["table_root"]]
 
 # Use the values to build full paths
-drivers_file_path <- file.path(data_root, "era5_vaisalaLightning_monthlySummerSummaries_2005-2010_NEclip.csv")
+drivers_file_path <- file.path(data_root, "monthly_drivers.csv")
 ```
 
 1. Read in the data

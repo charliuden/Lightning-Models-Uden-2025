@@ -45,7 +45,7 @@ Chen2021_file_path <- file.path(table_root, "Chen2021_models_predictions.csv")
 lm_file_path <- file.path(table_root, "Linear_Model_predictions.csv")
 glm_file_path <- file.path(table_root, "Gamma_GLM_predictions.csv")
 bayes_file_path <- file.path(table_root, "bayes_gamma_model_predictions.csv")
-monthly_drivers_file_path <- file.path(data_root, "era5_vaisalaLightning_monthlySummerSummaries_2005-2010_NEclip.csv")
+monthly_drivers_file_path <- file.path(data_root, "monthly_drivers.csv")
 ```
 
 ```{r}
