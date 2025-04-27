@@ -27,8 +27,6 @@ Refernce:
 Chen, Y., D. M. Romps, J. T. Seeley, S. Veraverbeke, W. J. Riley, Z. A. Mekonnen, and J. T. Randerson, 2021: Future increases in Arctic lightning and fire risk for permafrost carbon. Nat. Clim. Change, 11, 404–410, https://doi.org/10.1038/s41558-021-01011-y.
 
 ```{r, echo=FALSE, include=FALSE}
-library(rstan)
-library(loo)
 library(dplyr)
 library(stats)
 library(caret)
