@@ -64,6 +64,7 @@ print(df)
 ```
 
 ```{r}
+#make model group names more descriptive
 df <- df %>%
   mutate(group_name = case_when(
     group_name == "Chen et al. (2021)" ~ "Chen et al. (2021): C1-C5",
@@ -73,20 +74,8 @@ df <- df %>%
     TRUE ~ group_name  # Keeps other values unchanged
   ))
 
-df <- df %>%
-  mutate(predictors = case_when(
-    predictors == "SWR + T + RH + W + + P" ~ "SWR + T + RH + W + P",
-    TRUE ~ predictors))
-
-df <- df %>%
-  mutate(predictors = case_when(
-    predictors == "S" ~ "P",
-    TRUE ~ predictors  # Keeps other values unchanged
-  ))
-
-
 library(forcats)
-df$predictors <- fct_inorder(df$predictors)  # Maintain original order
+df$predictors <- fct_inorder(df$predictors)  # Maintain original order 
 df$group_name <- fct_inorder(df$group_name)  # Maintain original order
 
 head(df)
